@@ -179,7 +179,12 @@ static const char * const hw_platform_ifeature_code[] = {
 	[SOCINFO_FC_YF - SOCINFO_FC_Y0] = "YF",
 };
 
-#ifdef CONFIG_DEBUG_FS
+#define SMEM_IMAGE_VERSION_VARIANT_OFFSET      75
+#define SMEM_IMAGE_VERSION_OEM_OFFSET          95
+#define SMEM_IMAGE_VERSION_SINGLE_BLOCK_SIZE   128
+#define SMEM_IMAGE_VERSION_PARTITION_APPS      10
+#define IMAGE_MAX_LEN                          128
+
 #define SMEM_IMAGE_VERSION_BLOCKS_COUNT        32
 #define SMEM_IMAGE_VERSION_SIZE                4096
 #define SMEM_IMAGE_VERSION_NAME_SIZE           75
@@ -207,6 +212,7 @@ static const char * const hw_platform_ifeature_code[] = {
 /*
  * SMEM Image table names
  */
+#ifdef CONFIG_DEBUG_FS
 static const char *const socinfo_image_names[] = {
 	[SMEM_IMAGE_TABLE_ADSP_INDEX] = "adsp",
 	[SMEM_IMAGE_TABLE_APPS_INDEX] = "apps",
@@ -222,7 +228,9 @@ static const char *const socinfo_image_names[] = {
 	[SMEM_IMAGE_TABLE_GPDSP_INDEX] = "gpdsp",
 	[SMEM_IMAGE_TABLE_GPDSP1_INDEX] = "gpdsp1",
 };
+#endif /* CONFIG_DEBUG_FS */
 
+#ifdef CONFIG_DEBUG_FS
 static const char *const pmic_models[] = {
 	[0]  = "Unknown PMIC model",
 	[1]  = "PM8941",
@@ -344,6 +352,8 @@ struct smem_image_version {
 struct qcom_socinfo {
 	struct soc_device *soc_dev;
 	struct soc_device_attribute attr;
+	uint32_t current_image;
+	struct rw_semaphore current_image_rwsem;
 #ifdef CONFIG_DEBUG_FS
 	struct dentry *dbg_root;
 	struct socinfo_params info;
@@ -661,7 +671,323 @@ static const struct soc_id soc_id[] = {
 	{ qcom_board_id(CQ4390S) },
 };
 
+static struct qcom_socinfo *qsocinfo;
 static struct attribute *msm_custom_socinfo_attrs[MAX_SOCINFO_ATTRS];
+
+static char *socinfo_get_image_version_base_address(void)
+{
+	size_t size;
+	char *base;
+
+	base = qcom_smem_get(QCOM_SMEM_HOST_ANY, SMEM_IMAGE_VERSION_TABLE,
+			     &size);
+	if (IS_ERR_OR_NULL(base))
+		return base;
+
+	if (size < SMEM_IMAGE_VERSION_BLOCKS_COUNT *
+		   SMEM_IMAGE_VERSION_SINGLE_BLOCK_SIZE) {
+		pr_err("socinfo: SMEM image version table too small (%zu < %u)\n",
+		       size, SMEM_IMAGE_VERSION_BLOCKS_COUNT *
+			     SMEM_IMAGE_VERSION_SINGLE_BLOCK_SIZE);
+		return ERR_PTR(-EINVAL);
+	}
+
+	return base;
+}
+
+static char *socinfo_get_image_block_locked(void)
+{
+	char *base;
+	unsigned int block;
+
+	base = socinfo_get_image_version_base_address();
+	if (IS_ERR_OR_NULL(base))
+		return base;
+
+	block = qsocinfo->current_image;
+	if (block >= SMEM_IMAGE_VERSION_BLOCKS_COUNT) {
+		pr_err("socinfo: invalid current image index %u\n", block);
+		return ERR_PTR(-EINVAL);
+	}
+
+	return base + block * SMEM_IMAGE_VERSION_SINGLE_BLOCK_SIZE;
+}
+
+static ssize_t
+msm_get_image_version(struct device *dev,
+		struct device_attribute *attr,
+		char *buf)
+{
+	char *string_address;
+
+	down_read(&qsocinfo->current_image_rwsem);
+	string_address = socinfo_get_image_block_locked();
+	if (IS_ERR_OR_NULL(string_address)) {
+		up_read(&qsocinfo->current_image_rwsem);
+		return scnprintf(buf, SMEM_IMAGE_VERSION_NAME_SIZE, "Unknown");
+	}
+	up_read(&qsocinfo->current_image_rwsem);
+	return scnprintf(buf, SMEM_IMAGE_VERSION_NAME_SIZE, "%-.75s\n",
+			string_address);
+}
+
+static ssize_t
+msm_set_image_version(struct device *dev,
+		struct device_attribute *attr,
+		const char *buf,
+		size_t count)
+{
+	char *store_address;
+	size_t len;
+
+	down_read(&qsocinfo->current_image_rwsem);
+	if (qsocinfo->current_image != SMEM_IMAGE_VERSION_PARTITION_APPS) {
+		up_read(&qsocinfo->current_image_rwsem);
+		return count;
+	}
+	store_address = socinfo_get_image_block_locked();
+	if (IS_ERR_OR_NULL(store_address)) {
+		pr_err("Failed to get image version base address\n");
+		up_read(&qsocinfo->current_image_rwsem);
+		return count;
+	}
+	up_read(&qsocinfo->current_image_rwsem);
+	/* buf is not NUL-terminated; bound the copy by count, not %s */
+	len = min_t(size_t, count, SMEM_IMAGE_VERSION_NAME_SIZE - 1);
+	if (len && buf[len - 1] == '\n')
+		len--;
+	memcpy(store_address, buf, len);
+	store_address[len] = '\0';
+	return count;
+}
+
+static ssize_t
+msm_get_image_variant(struct device *dev,
+		struct device_attribute *attr,
+		char *buf)
+{
+	char *string_address;
+
+	down_read(&qsocinfo->current_image_rwsem);
+	string_address = socinfo_get_image_block_locked();
+	if (IS_ERR_OR_NULL(string_address)) {
+		up_read(&qsocinfo->current_image_rwsem);
+		return scnprintf(buf, SMEM_IMAGE_VERSION_VARIANT_SIZE,
+				"Unknown");
+	}
+	up_read(&qsocinfo->current_image_rwsem);
+	string_address += SMEM_IMAGE_VERSION_VARIANT_OFFSET;
+	return scnprintf(buf, SMEM_IMAGE_VERSION_VARIANT_SIZE, "%-.20s\n",
+			string_address);
+}
+
+static ssize_t
+msm_set_image_variant(struct device *dev,
+		struct device_attribute *attr,
+		const char *buf,
+		size_t count)
+{
+	char *store_address;
+	size_t len;
+
+	down_read(&qsocinfo->current_image_rwsem);
+	if (qsocinfo->current_image != SMEM_IMAGE_VERSION_PARTITION_APPS) {
+		up_read(&qsocinfo->current_image_rwsem);
+		return count;
+	}
+	store_address = socinfo_get_image_block_locked();
+	if (IS_ERR_OR_NULL(store_address)) {
+		pr_err("Failed to get image version base address\n");
+		up_read(&qsocinfo->current_image_rwsem);
+		return count;
+	}
+	up_read(&qsocinfo->current_image_rwsem);
+	store_address += SMEM_IMAGE_VERSION_VARIANT_OFFSET;
+	/* buf is not NUL-terminated; bound the copy by count, not %s */
+	len = min_t(size_t, count, SMEM_IMAGE_VERSION_VARIANT_SIZE - 1);
+	if (len && buf[len - 1] == '\n')
+		len--;
+	memcpy(store_address, buf, len);
+	store_address[len] = '\0';
+	return count;
+}
+
+static ssize_t
+msm_get_image_crm_version(struct device *dev,
+		struct device_attribute *attr,
+		char *buf)
+{
+	char *string_address;
+
+	down_read(&qsocinfo->current_image_rwsem);
+	string_address = socinfo_get_image_block_locked();
+	if (IS_ERR_OR_NULL(string_address)) {
+		up_read(&qsocinfo->current_image_rwsem);
+		return scnprintf(buf, SMEM_IMAGE_VERSION_OEM_SIZE, "Unknown");
+	}
+	up_read(&qsocinfo->current_image_rwsem);
+	string_address += SMEM_IMAGE_VERSION_OEM_OFFSET;
+	return scnprintf(buf, SMEM_IMAGE_VERSION_OEM_SIZE, "%-.33s\n",
+			string_address);
+}
+
+static ssize_t
+msm_set_image_crm_version(struct device *dev,
+		struct device_attribute *attr,
+		const char *buf,
+		size_t count)
+{
+	char *store_address;
+	size_t len;
+
+	down_read(&qsocinfo->current_image_rwsem);
+	if (qsocinfo->current_image != SMEM_IMAGE_VERSION_PARTITION_APPS) {
+		up_read(&qsocinfo->current_image_rwsem);
+		return count;
+	}
+	store_address = socinfo_get_image_block_locked();
+	if (IS_ERR_OR_NULL(store_address)) {
+		pr_err("Failed to get image version base address\n");
+		up_read(&qsocinfo->current_image_rwsem);
+		return count;
+	}
+	up_read(&qsocinfo->current_image_rwsem);
+	store_address += SMEM_IMAGE_VERSION_OEM_OFFSET;
+	/* buf is not NUL-terminated; bound the copy by count, not %s */
+	len = min_t(size_t, count, SMEM_IMAGE_VERSION_OEM_SIZE - 1);
+	if (len && buf[len - 1] == '\n')
+		len--;
+	memcpy(store_address, buf, len);
+	store_address[len] = '\0';
+	return count;
+}
+
+static ssize_t
+msm_get_image_number(struct device *dev,
+		struct device_attribute *attr,
+		char *buf)
+{
+	int ret;
+
+	down_read(&qsocinfo->current_image_rwsem);
+	ret = scnprintf(buf, PAGE_SIZE, "%d\n",
+			qsocinfo->current_image);
+	up_read(&qsocinfo->current_image_rwsem);
+	return ret;
+
+}
+
+static ssize_t
+msm_select_image(struct device *dev, struct device_attribute *attr,
+		const char *buf, size_t count)
+{
+	int ret, digit;
+
+	ret = kstrtoint(buf, 10, &digit);
+	if (ret)
+		return ret;
+	down_write(&qsocinfo->current_image_rwsem);
+	if (digit >= 0 && digit < SMEM_IMAGE_VERSION_BLOCKS_COUNT)
+		qsocinfo->current_image = digit;
+	else
+		qsocinfo->current_image = 0;
+	up_write(&qsocinfo->current_image_rwsem);
+	return count;
+}
+
+static bool is_duplicate_adsp_image(char *image_data, int current_index)
+{
+	static const char adsp_marker[] = "LPAIDSP";
+	int i;
+
+	if (current_index <= SMEM_IMAGE_TABLE_ADSP_INDEX)
+		return false;
+
+	/*
+	 * Bound the scan to the image name field of the block: a block that
+	 * is not NUL-terminated would otherwise make strstr() keep scanning
+	 * past the block and off the end of the SMEM allocation.
+	 */
+	for (i = 0; i + sizeof(adsp_marker) - 1 <=
+	     SMEM_IMAGE_VERSION_NAME_SIZE; i++) {
+		if (!memcmp(image_data + i, adsp_marker,
+			    sizeof(adsp_marker) - 1))
+			return true;
+	}
+
+    return false;
+}
+
+static ssize_t
+msm_get_images(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	int pos = 0;
+	int image;
+	char *image_address;
+
+	image_address = socinfo_get_image_version_base_address();
+	if (IS_ERR_OR_NULL(image_address))
+		return scnprintf(buf, PAGE_SIZE, "Unavailable\n");
+
+	*buf = '\0';
+	for (image = 0; image < SMEM_IMAGE_VERSION_BLOCKS_COUNT; image++) {
+		if (pos >= PAGE_SIZE)
+			break;
+
+		if (*image_address == '\0') {
+			image_address += SMEM_IMAGE_VERSION_SINGLE_BLOCK_SIZE;
+			continue;
+		}
+
+		if (is_duplicate_adsp_image(image_address, image)) {
+		    image_address += SMEM_IMAGE_VERSION_SINGLE_BLOCK_SIZE;
+		    continue;
+		}
+
+		if (pos < PAGE_SIZE)
+		pos += scnprintf(buf + pos, PAGE_SIZE - pos, "%d:\n",
+				image);
+		if (pos < PAGE_SIZE)
+		pos += scnprintf(buf + pos, PAGE_SIZE - pos,
+				"\tCRM:\t\t%-.75s\n", image_address);
+		if (pos < PAGE_SIZE)
+		pos += scnprintf(buf + pos, PAGE_SIZE - pos,
+				"\tVariant:\t%-.20s\n",
+				image_address + SMEM_IMAGE_VERSION_VARIANT_OFFSET);
+		if (pos < PAGE_SIZE)
+		pos += scnprintf(buf + pos, PAGE_SIZE - pos,
+				"\tVersion:\t%-.33s\n",
+				image_address + SMEM_IMAGE_VERSION_OEM_OFFSET);
+
+		image_address += SMEM_IMAGE_VERSION_SINGLE_BLOCK_SIZE;
+	}
+
+	/* Truncation may have inflated pos beyond PAGE_SIZE. */
+	if (pos > PAGE_SIZE)
+		pos = PAGE_SIZE;
+	return pos;
+}
+
+static struct device_attribute image_version =
+__ATTR(image_version, 0644,
+		msm_get_image_version, msm_set_image_version);
+
+static struct device_attribute image_variant =
+__ATTR(image_variant, 0644,
+		msm_get_image_variant, msm_set_image_variant);
+
+static struct device_attribute image_crm_version =
+__ATTR(image_crm_version, 0644,
+		msm_get_image_crm_version, msm_set_image_crm_version);
+
+static struct device_attribute select_image =
+__ATTR(select_image, 0644,
+		msm_get_image_number, msm_select_image);
+
+static struct device_attribute images =
+__ATTR(images, 0444, msm_get_images, NULL);
+
 
 static const char *socinfo_machine(struct device *dev, unsigned int id)
 {
@@ -1362,7 +1688,11 @@ static void socinfo_populate_sysfs(struct qcom_socinfo *qcom_socinfo)
 				SOCINFO_MINOR(socinfo_format));
 		break;
 	}
-
+	msm_custom_socinfo_attrs[i++] = &image_version.attr;
+	msm_custom_socinfo_attrs[i++] = &image_variant.attr;
+	msm_custom_socinfo_attrs[i++] = &image_crm_version.attr;
+	msm_custom_socinfo_attrs[i++] = &select_image.attr;
+	msm_custom_socinfo_attrs[i++] = &images.attr;
 	msm_custom_socinfo_attrs[i++] = NULL;
 	qcom_socinfo->attr.custom_attr_group = &custom_soc_attr_group;
 }
@@ -1761,7 +2091,10 @@ static int qcom_socinfo_probe(struct platform_device *pdev)
 			machine, socinfo_get_pcode_id(), fc);
 	}
 
+	qsocinfo = qs;
+	init_rwsem(&qs->current_image_rwsem);
 	socinfo_populate_sysfs(qs);
+
 	qs->soc_dev = soc_device_register(&qs->attr);
 	if (IS_ERR(qs->soc_dev))
 		return PTR_ERR(qs->soc_dev);
@@ -1783,7 +2116,6 @@ static int qcom_socinfo_remove(struct platform_device *pdev)
 	soc_device_unregister(qs->soc_dev);
 
 	socinfo_debugfs_exit(qs);
-
 	return 0;
 }
 

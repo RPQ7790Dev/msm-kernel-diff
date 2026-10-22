@@ -884,6 +884,7 @@ EXPORT_SYMBOL_GPL(rcu_check_boost_fail);
  */
 void show_rcu_gp_kthreads(void)
 {
+#if PRINTK_INFO_EN
 	unsigned long cbs = 0;
 	int cpu;
 	unsigned long j;
@@ -939,11 +940,14 @@ void show_rcu_gp_kthreads(void)
 	for_each_possible_cpu(cpu) {
 		rdp = per_cpu_ptr(&rcu_data, cpu);
 		cbs += data_race(READ_ONCE(rdp->n_cbs_invoked));
+#if PRINTK_INFO_EN
 		if (rcu_segcblist_is_offloaded(&rdp->cblist))
 			show_rcu_nocb_state(rdp);
+#endif
 	}
 	pr_info("RCU callbacks invoked since boot: %lu\n", cbs);
 	show_rcu_tasks_gp_kthreads();
+#endif
 }
 EXPORT_SYMBOL_GPL(show_rcu_gp_kthreads);
 

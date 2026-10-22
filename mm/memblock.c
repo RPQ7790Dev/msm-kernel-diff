@@ -730,11 +730,12 @@ done:
 int __init_memblock memblock_add_node(phys_addr_t base, phys_addr_t size,
 				      int nid, enum memblock_flags flags)
 {
+#if PRINTK_INFO_EN
 	phys_addr_t end = base + size - 1;
 
 	memblock_dbg("%s: [%pa-%pa] nid=%d flags=%x %pS\n", __func__,
 		     &base, &end, nid, flags, (void *)_RET_IP_);
-
+#endif
 	return memblock_add_range(&memblock.memory, base, size, nid, flags);
 }
 
@@ -751,11 +752,12 @@ int __init_memblock memblock_add_node(phys_addr_t base, phys_addr_t size,
  */
 int __init_memblock memblock_add(phys_addr_t base, phys_addr_t size)
 {
+#if PRINTK_INFO_EN
 	phys_addr_t end = base + size - 1;
 
 	memblock_dbg("%s: [%pa-%pa] %pS\n", __func__,
 		     &base, &end, (void *)_RET_IP_);
-
+#endif
 	return memblock_add_range(&memblock.memory, base, size, MAX_NUMNODES, 0);
 }
 
@@ -893,11 +895,12 @@ static int __init_memblock memblock_remove_range(struct memblock_type *type,
 
 int __init_memblock memblock_remove(phys_addr_t base, phys_addr_t size)
 {
+#if PRINTK_INFO_EN
 	phys_addr_t end = base + size - 1;
 
 	memblock_dbg("%s: [%pa-%pa] %pS\n", __func__,
 		     &base, &end, (void *)_RET_IP_);
-
+#endif
 	return memblock_remove_range(&memblock.memory, base, size);
 }
 
@@ -925,11 +928,12 @@ void __init_memblock memblock_free(void *ptr, size_t size)
  */
 int __init_memblock memblock_phys_free(phys_addr_t base, phys_addr_t size)
 {
+#if PRINTK_INFO_EN
 	phys_addr_t end = base + size - 1;
 
 	memblock_dbg("%s: [%pa-%pa] %pS\n", __func__,
 		     &base, &end, (void *)_RET_IP_);
-
+#endif
 	kmemleak_free_part_phys(base, size);
 	return memblock_remove_range(&memblock.reserved, base, size);
 }
@@ -939,11 +943,12 @@ EXPORT_SYMBOL_GPL(memblock_free);
 
 int __init_memblock memblock_reserve(phys_addr_t base, phys_addr_t size)
 {
+#if PRINTK_INFO_EN
 	phys_addr_t end = base + size - 1;
 
 	memblock_dbg("%s: [%pa-%pa] %pS\n", __func__,
 		     &base, &end, (void *)_RET_IP_);
-
+#endif
 	return memblock_add_range(&memblock.reserved, base, size, MAX_NUMNODES, 0);
 }
 
@@ -1985,8 +1990,9 @@ static void __init_memblock memblock_dump(struct memblock_type *type)
 	pr_info(" %s.cnt  = 0x%lx\n", type->name, type->cnt);
 
 	for_each_memblock_type(idx, type, rgn) {
+#if PRINTK_INFO_EN
 		char nid_buf[32] = "";
-
+#endif
 		base = rgn->base;
 		size = rgn->size;
 		end = base + size - 1;

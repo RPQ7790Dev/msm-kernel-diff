@@ -362,7 +362,7 @@ int rpmh_write_batch(const struct device *dev, enum rpmh_state state,
 		 * we've returned from this function.
 		 */
 		rpmh_rsc_debug(ctrlr_to_drv(ctrlr), &compl);
-		BUG_ON(1);
+		return -ETIMEDOUT;
 	}
 
 	return 0;

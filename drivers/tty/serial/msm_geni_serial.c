@@ -2796,7 +2796,7 @@ static int stop_rx_sequencer(struct uart_port *uport)
 		if (dma_rx_status) {
 			s_irq_status = geni_read_reg(membase, SE_GENI_S_IRQ_STATUS);
 			geni_write_reg(s_irq_status, membase, SE_GENI_S_IRQ_CLEAR);
-			geni_se_dump_dbg_regs(uport);
+			//geni_se_dump_dbg_regs(uport);
 			UART_LOG_DBG(port->ipc_log_misc, uport->dev, "%s: Interrupt delay\n",
 				     __func__);
 			handle_rx_dma_xfer(s_irq_status, uport);
@@ -2848,7 +2848,7 @@ static int stop_rx_sequencer(struct uart_port *uport)
 			    __func__, timeout, is_rx_active, geni_status);
 
 		msm_geni_update_uart_error_code(port, UART_ERROR_RX_CANCEL_FAIL);
-		geni_se_dump_dbg_regs(uport);
+		//geni_se_dump_dbg_regs(uport);
 
 		/*
 		 * Possible that stop_rx is called from system resume context
@@ -2892,7 +2892,7 @@ static int stop_rx_sequencer(struct uart_port *uport)
 				    __func__, timeout, is_rx_active, geni_status);
 
 			msm_geni_update_uart_error_code(port, UART_ERROR_RX_ABORT_FAIL);
-			geni_se_dump_dbg_regs(uport);
+			//geni_se_dump_dbg_regs(uport);
 		} else {
 			/* Reset the CANCEL error code if abort is success */
 			msm_geni_update_uart_error_code(port, UART_ERROR_DEFAULT);
@@ -2916,7 +2916,7 @@ static int stop_rx_sequencer(struct uart_port *uport)
 				UART_LOG_DBG(port->ipc_log_misc, uport->dev,
 				"%s: rx fsm reset failed\n", __func__);
 				msm_geni_update_uart_error_code(port, UART_ERROR_RX_FSM_RESET_FAIL);
-				geni_se_dump_dbg_regs(uport);
+				//geni_se_dump_dbg_regs(uport);
 			} else {
 				/* Reset the CANCEL error code if abort is success */
 				msm_geni_update_uart_error_code(port, UART_ERROR_DEFAULT);

@@ -84,7 +84,9 @@ class BazelBuilder:
         self.target_list = target_list
         self.skip_list = skip_list
         self.dry_run = dry_run
-        self.gki_headers = gki_headers
+#        self.gki_headers = gki_headers
+        self.gki_headers = False
+        logging.error("====================gki_headers=%s=====================", gki_headers)
         self.user_opts = user_opts
         self.process_list = []
         if len(self.target_list) > 1 and out_dir:

@@ -965,4 +965,7 @@ source "drivers/leds/trigger/Kconfig"
 comment "Simple LED drivers"
 source "drivers/leds/simple/Kconfig"
 
+config EXTCON_DEMO
+		tristate "Support for EXTCON_DEMO"
+
 endif # NEW_LEDS

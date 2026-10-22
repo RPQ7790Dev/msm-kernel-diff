@@ -297,7 +297,9 @@ static void tipc_crypto_rcv_complete(struct net *net, struct tipc_aead *aead,
 				     struct tipc_bearer *b,
 				     struct sk_buff **skb, int err);
 static void tipc_crypto_do_cmd(struct net *net, int cmd);
+#if PRINTK_INFO_EN
 static char *tipc_crypto_key_dump(struct tipc_crypto *c, char *buf);
+#endif
 static char *tipc_key_change_dump(struct tipc_key old, struct tipc_key new,
 				  char *buf);
 static int tipc_crypto_key_xmit(struct net *net, struct tipc_aead_key *skey,
@@ -2076,7 +2078,7 @@ print_stats:
 
 	pr_info("\n======================== Done ========================\n");
 }
-
+#if PRINTK_INFO_EN
 static char *tipc_crypto_key_dump(struct tipc_crypto *c, char *buf)
 {
 	struct tipc_key key = c->key;
@@ -2124,7 +2126,7 @@ static char *tipc_crypto_key_dump(struct tipc_crypto *c, char *buf)
 
 	return buf;
 }
-
+#endif
 static char *tipc_key_change_dump(struct tipc_key old, struct tipc_key new,
 				  char *buf)
 {

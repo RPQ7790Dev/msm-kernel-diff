@@ -977,7 +977,7 @@ static void __init print_kernel_cmdline(const char *cmdline)
 		cmdline += used;
 	}
 	if (len)
-		pr_notice("%s%s\n", KERNEL_CMDLINE_PREFIX, cmdline);
+		pr_err(" 2 %s%s\n", KERNEL_CMDLINE_PREFIX, cmdline);
 }
 
 #ifdef CONFIG_GKI_DYNAMIC_TASK_STRUCT_SIZE

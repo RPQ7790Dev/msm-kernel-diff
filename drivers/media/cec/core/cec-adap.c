@@ -2048,10 +2048,12 @@ static int cec_receive_notify(struct cec_adapter *adap, struct cec_msg *msg,
 	switch (msg->msg[1]) {
 	/* The following messages are processed but still passed through */
 	case CEC_MSG_REPORT_PHYSICAL_ADDR: {
+#if PRINTK_INFO_EN
 		u16 pa = (msg->msg[2] << 8) | msg->msg[3];
 
 		dprintk(1, "reported physical address %x.%x.%x.%x for logical address %d\n",
 			cec_phys_addr_exp(pa), init_laddr);
+#endif
 		break;
 	}
 

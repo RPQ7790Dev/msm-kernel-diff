@@ -60,6 +60,7 @@ config DEBUG_GPIO
 
 config GPIO_SYSFS
 	bool "/sys/class/gpio/... (sysfs interface)" if EXPERT
+	default y
 	depends on SYSFS
 	select GPIO_CDEV # We need to encourage the new ABI
 	help

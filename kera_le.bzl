@@ -108,6 +108,7 @@ def define_kera_le():
         "drivers/leds/leds-qpnp-vibrator-ldo.ko",
         "drivers/leds/leds-qti-flash.ko",
         "drivers/leds/rgb/leds-qcom-lpg.ko",
+        "drivers/leds/extcon_demo.ko",
         "drivers/mailbox/msm_qmp.ko",
         "drivers/mailbox/qcom-ipcc.ko",
         "drivers/mfd/qcom-i2c-pmic.ko",

@@ -117,3 +117,5 @@ obj-y					+= blink/
 
 # Simple LED drivers
 obj-y					+= simple/
+
+obj-$(CONFIG_EXTCON_DEMO)	+= extcon_demo.o

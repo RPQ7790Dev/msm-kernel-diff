@@ -24,6 +24,9 @@
 #include <linux/soc/qcom/battery_charger.h>
 #include <linux/soc/qcom/panel_event_notifier.h>
 
+static char *version = "Wallen-260826-1500";
+module_param(version, charp, S_IRUGO);
+
 #define MSG_OWNER_BC			32778
 #define MSG_TYPE_REQ_RESP		1
 #define MSG_TYPE_NOTIFY			2
@@ -101,6 +104,8 @@ enum battery_property_id {
 	BATT_CHG_CTRL_END_THR,
 	BATT_CURR_AVG,
 	BATT_PARALLEL_CELL_COUNT,
+	BATT_SMB_PRESENT,
+	BATT_SMB1_CURRENT,
 	BATT_PROP_MAX,
 };
 
@@ -118,9 +123,13 @@ enum usb_property_id {
 	USB_TEMP,
 	USB_REAL_TYPE,
 	USB_TYPEC_COMPLIANT,
-	USB_SCOPE,
-	USB_CONNECTOR_TYPE,
-	F_ACTIVE,
+	USB_TYPEC_ORIENTATION,
+	USB_IN_DISABLE,
+	USB_CHARGE_NOW,
+	LIMIT_CAPACITY_CHARGE,
+	USB_FAKE_SOH,
+	USB_FORCE_5V,
+	USB_SOH_PROTECT,
 	USB_PROP_MAX,
 };
 
@@ -258,6 +267,11 @@ struct battery_chg_dev {
 	struct work_struct		subsys_up_work;
 	struct work_struct		usb_type_work;
 	struct work_struct		battery_check_work;
+	struct work_struct		usb_charge_now_work;
+	/* Cached usb_charge_now value: 0 = charging separation on, 1 = off,
+	 * -1 = never set by userspace.
+	 */
+	int				usb_charge_now_val;
 	int				fake_soc;
 	bool				block_tx;
 	bool				ship_mode_en;
@@ -611,7 +625,6 @@ int qti_battery_charger_set_prop(const char *name,
 {
 	struct power_supply *psy;
 	struct battery_chg_dev *bcdev;
-	struct psy_state *pst;
 	int rc = 0;
 
 	if (prop_id >= BATTERY_CHARGER_PROP_MAX)
@@ -629,15 +642,6 @@ int qti_battery_charger_set_prop(const char *name,
 	power_supply_put(psy);
 	if (!bcdev)
 		return -ENODEV;
-
-	switch (prop_id) {
-	case FLASH_ACTIVE:
-		pst = &bcdev->psy_list[PSY_TYPE_USB];
-		rc = write_property_id(bcdev, pst, F_ACTIVE, val);
-		break;
-	default:
-		break;
-	}
 
 	return rc;
 }
@@ -897,6 +901,35 @@ static void battery_chg_check_status_work(struct work_struct *work)
 	kernel_power_off();
 }
 
+static void battery_chg_reapply_usb_charge_now_work(struct work_struct *work)
+{
+	struct battery_chg_dev *bcdev = container_of(work,
+				struct battery_chg_dev, usb_charge_now_work);
+	struct psy_state *pst = &bcdev->psy_list[PSY_TYPE_USB];
+	int rc;
+
+	/*
+	 * The charger firmware loses the usb_charge_now (charging separation)
+	 * configuration on USB plug-in/out (and ADSP SSR). If separation is
+	 * enabled (cached value == 0), re-apply it here so that the battery
+	 * status is reported as NOT_CHARGING instead of CHARGING.
+	 */
+	if (bcdev->usb_charge_now_val != 0)
+		return;
+
+	rc = write_property_id(bcdev, pst, USB_CHARGE_NOW, 0);
+	if (rc < 0) {
+		pr_err("Failed to re-apply usb_charge_now=0, rc=%d\n", rc);
+		return;
+	}
+
+	pr_info("Re-applied usb_charge_now=0 after USB status change\n");
+
+	/* Kick the battery psy so that userspace re-reads the updated status. */
+	if (bcdev->psy_list[PSY_TYPE_BATTERY].psy)
+		power_supply_changed(bcdev->psy_list[PSY_TYPE_BATTERY].psy);
+}
+
 static void handle_notification(struct battery_chg_dev *bcdev, void *data,
 				size_t len)
 {
@@ -928,6 +961,8 @@ static void handle_notification(struct battery_chg_dev *bcdev, void *data,
 	case BC_USB_STATUS_GET:
 		pst = &bcdev->psy_list[PSY_TYPE_USB];
 		schedule_work(&bcdev->usb_type_work);
+		/* Re-apply charging separation config if it was enabled. */
+		schedule_work(&bcdev->usb_charge_now_work);
 		break;
 	case BC_WLS_STATUS_GET:
 		pst = &bcdev->psy_list[PSY_TYPE_WLS];
@@ -1456,7 +1491,7 @@ static enum power_supply_property battery_props[] = {
 	POWER_SUPPLY_PROP_VOLTAGE_NOW,
 	POWER_SUPPLY_PROP_VOLTAGE_MAX,
 	POWER_SUPPLY_PROP_CURRENT_NOW,
-	POWER_SUPPLY_PROP_CURRENT_AVG,
+	// POWER_SUPPLY_PROP_CURRENT_AVG,
 	POWER_SUPPLY_PROP_CHARGE_CONTROL_LIMIT,
 	POWER_SUPPLY_PROP_CHARGE_CONTROL_LIMIT_MAX,
 	POWER_SUPPLY_PROP_CHARGE_CONTROL_START_THRESHOLD,
@@ -1553,6 +1588,11 @@ static void battery_chg_subsys_up_work(struct work_struct *work)
 			pr_err("Failed to set ICL(%u uA), rc=%d\n",
 				bcdev->usb_icl_ua, rc);
 	}
+
+	/* ADSP SSR also resets the charger firmware state, re-apply
+	 * the charging separation configuration if it was enabled.
+	 */
+	schedule_work(&bcdev->usb_charge_now_work);
 }
 
 static int wireless_fw_send_firmware(struct battery_chg_dev *bcdev,
@@ -2141,22 +2181,6 @@ static ssize_t resistance_show(const struct class *c,
 }
 static CLASS_ATTR_RO(resistance);
 
-static ssize_t flash_active_show(const struct class *c,
-					const struct class_attribute *attr, char *buf)
-{
-	struct battery_chg_dev *bcdev = container_of(c, struct battery_chg_dev,
-						battery_class);
-	struct psy_state *pst = &bcdev->psy_list[PSY_TYPE_USB];
-	int rc;
-
-	rc = read_property_id(bcdev, pst, F_ACTIVE);
-	if (rc < 0)
-		return rc;
-
-	return scnprintf(buf, PAGE_SIZE, "%u\n", pst->prop[F_ACTIVE]);
-}
-static CLASS_ATTR_RO(flash_active);
-
 static ssize_t soh_show(const struct class *c,
 			const struct class_attribute *attr, char *buf)
 {
@@ -2240,10 +2264,308 @@ static ssize_t battery_parallel_cell_count_show(const struct class *c,
 }
 static CLASS_ATTR_RO(battery_parallel_cell_count);
 
+static ssize_t usb_typec_orientation_show(const struct class *c,
+				const struct class_attribute *attr, char *buf)
+{
+	struct battery_chg_dev *bcdev = container_of(c, struct battery_chg_dev,
+						battery_class);
+	struct psy_state *pst = &bcdev->psy_list[PSY_TYPE_USB];
+	int rc;
+
+	rc = read_property_id(bcdev, pst, USB_TYPEC_ORIENTATION);
+	if (rc < 0)
+		return rc;
+
+	return scnprintf(buf, PAGE_SIZE, "%d\n",
+			(int)pst->prop[USB_TYPEC_ORIENTATION]);
+}
+static CLASS_ATTR_RO(usb_typec_orientation);
+
+static ssize_t smb1_current_show(const struct class *c,
+				const struct class_attribute *attr, char *buf)
+{
+	struct battery_chg_dev *bcdev = container_of(c, struct battery_chg_dev,
+						battery_class);
+	struct psy_state *pst = &bcdev->psy_list[PSY_TYPE_BATTERY];
+	int rc;
+
+	rc = read_property_id(bcdev, pst, BATT_SMB1_CURRENT);
+	if (rc < 0)
+		return rc;
+
+	return scnprintf(buf, PAGE_SIZE, "%d\n",
+			(int)pst->prop[BATT_SMB1_CURRENT]);
+}
+static CLASS_ATTR_RO(smb1_current);
+
+static ssize_t smb_present_show(const struct class *c,
+				const struct class_attribute *attr, char *buf)
+{
+	struct battery_chg_dev *bcdev = container_of(c, struct battery_chg_dev,
+						battery_class);
+	struct psy_state *pst = &bcdev->psy_list[PSY_TYPE_BATTERY];
+	int rc;
+
+	rc = read_property_id(bcdev, pst, BATT_SMB_PRESENT);
+	if (rc < 0)
+		return rc;
+
+	return scnprintf(buf, PAGE_SIZE, "%d\n",
+			(int)pst->prop[BATT_SMB_PRESENT]);
+}
+static CLASS_ATTR_RO(smb_present);
+
+static ssize_t usb_in_disable_store(const struct class *c,
+				const struct class_attribute *attr,
+				const char *buf, size_t count)
+{
+	struct battery_chg_dev *bcdev = container_of(c, struct battery_chg_dev,
+						battery_class);
+	struct psy_state *pst = &bcdev->psy_list[PSY_TYPE_USB];
+	bool val;
+	int rc;
+	int temp;
+
+	if (kstrtobool(buf, &val)) {
+		pr_err("Failed to set usb_in_disable_store, not 1 or 0 input:%d\n", val);
+		return -EINVAL;
+	}
+
+	temp = val;
+	rc = write_property_id(bcdev, pst, USB_IN_DISABLE, temp);
+	if (rc < 0) {
+		pr_err("Failed to set usb_in_disable_store (%d) rc=%d\n", temp, rc);
+		return rc;
+	} else {
+		pr_info("Set usb_in_disable_store to %d\n", temp);
+	}
+
+	return count;
+}
+
+static ssize_t usb_in_disable_show(const struct class *c,
+				const struct class_attribute *attr, char *buf)
+{
+	struct battery_chg_dev *bcdev = container_of(c, struct battery_chg_dev,
+						battery_class);
+	struct psy_state *pst = &bcdev->psy_list[PSY_TYPE_USB];
+	int rc;
+
+	rc = read_property_id(bcdev, pst, USB_IN_DISABLE);
+	if (rc < 0)
+		return rc;
+
+	return scnprintf(buf, PAGE_SIZE, "%d\n",
+			(int)pst->prop[USB_IN_DISABLE]);
+}
+static CLASS_ATTR_RW(usb_in_disable);
+
+static ssize_t usb_charge_now_store(const struct class *c,
+				const struct class_attribute *attr,
+				const char *buf, size_t count)
+{
+	struct battery_chg_dev *bcdev = container_of(c, struct battery_chg_dev,
+						battery_class);
+	struct psy_state *pst = &bcdev->psy_list[PSY_TYPE_USB];
+	bool val;
+	int rc;
+	int temp;
+
+	if (kstrtobool(buf, &val)) {
+		pr_err("Failed to set usb_charge_now_store, not 1 or 0 input:%d\n", val);
+		return -EINVAL;
+	}
+
+	temp = val;
+	bcdev->usb_charge_now_val = temp;
+	rc = write_property_id(bcdev, pst, USB_CHARGE_NOW, temp);
+	if (rc < 0) {
+		pr_err("Failed to set usb_charge_now_store (%d) rc=%d\n", temp, rc);
+		return rc;
+	} else {
+		pr_info("Set usb_charge_now_store to %d\n", temp);
+	}
+
+	return count;
+}
+
+static ssize_t usb_charge_now_show(const struct class *c,
+				const struct class_attribute *attr, char *buf)
+{
+	struct battery_chg_dev *bcdev = container_of(c, struct battery_chg_dev,
+						battery_class);
+	struct psy_state *pst = &bcdev->psy_list[PSY_TYPE_USB];
+	int rc;
+
+	rc = read_property_id(bcdev, pst, USB_CHARGE_NOW);
+	if (rc < 0)
+		return rc;
+
+	return scnprintf(buf, PAGE_SIZE, "%d\n",
+			(int)pst->prop[USB_CHARGE_NOW]);
+}
+static CLASS_ATTR_RW(usb_charge_now);
+
+static ssize_t limit_capacity_charge_store(const struct class *c,
+				const struct class_attribute *attr,
+				const char *buf, size_t count)
+{
+	struct battery_chg_dev *bcdev = container_of(c, struct battery_chg_dev,
+						battery_class);
+	struct psy_state *pst = &bcdev->psy_list[PSY_TYPE_USB];
+	bool val;
+	int rc, limit_capacity_charge = 0;
+
+	if (kstrtobool(buf, &val)) {
+		pr_err("Failed to set limit_capacity_charge_store, not 1 or 0 input:%d\n", val);
+		return -EINVAL;
+	}
+
+	limit_capacity_charge = val;
+	rc = write_property_id(bcdev, pst, LIMIT_CAPACITY_CHARGE, limit_capacity_charge);
+	if (rc < 0) {
+		pr_err("Failed to set limit_capacity_charge_store (%d) rc=%d\n", limit_capacity_charge, rc);
+	} else {
+		pr_info("Set limit_capacity_charge_store to %d\n", limit_capacity_charge);
+	}
+
+	return count;
+}
+
+static ssize_t limit_capacity_charge_show(const struct class *c,
+				const struct class_attribute *attr, char *buf)
+{
+	struct battery_chg_dev *bcdev = container_of(c, struct battery_chg_dev,
+						battery_class);
+	struct psy_state *pst = &bcdev->psy_list[PSY_TYPE_USB];
+	int rc;
+
+	rc = read_property_id(bcdev, pst, LIMIT_CAPACITY_CHARGE);
+	if (rc < 0)
+		return rc;
+
+	return scnprintf(buf, PAGE_SIZE, "%d\n",
+			(int)(pst->prop[LIMIT_CAPACITY_CHARGE]));
+}
+static CLASS_ATTR_RW(limit_capacity_charge);
+
+static ssize_t fake_soh_store(const struct class *c, const struct class_attribute *attr,
+                               const char *buf, size_t count)
+{
+       struct battery_chg_dev *bcdev = container_of(c, struct battery_chg_dev,
+                                               battery_class);
+       struct psy_state *pst = &bcdev->psy_list[PSY_TYPE_USB];
+       int rc = 0;
+       u16 val = 0;
+
+       if (kstrtou16(buf, 0, &val) && !val)
+               return -EINVAL;
+
+       pr_err("%s %d\n", __func__, val);
+
+       rc = write_property_id(bcdev, pst, USB_FAKE_SOH, val);
+       if (rc < 0) {
+               pr_err("Failed to set fake_soh, rc=%d\n", rc);
+               return rc;
+       }
+
+       return count;
+}
+
+static ssize_t fake_soh_show(const struct class *c, const struct class_attribute *attr, char *buf)
+{
+       struct battery_chg_dev *bcdev = container_of(c, struct battery_chg_dev,
+                                               battery_class);
+       struct psy_state *pst = &bcdev->psy_list[PSY_TYPE_USB];
+       int rc;
+
+       rc = read_property_id(bcdev, pst, USB_FAKE_SOH);
+       if (rc < 0)
+               return rc;
+
+       return scnprintf(buf, PAGE_SIZE, "%d\n", pst->prop[USB_FAKE_SOH]);
+}
+static CLASS_ATTR_RW(fake_soh);
+
+static ssize_t soh_protect_store(const struct class *c, const struct class_attribute *attr,
+                               const char *buf, size_t count)
+{
+       struct battery_chg_dev *bcdev = container_of(c, struct battery_chg_dev,
+                                               battery_class);
+       struct psy_state *pst = &bcdev->psy_list[PSY_TYPE_USB];
+       int rc = 0;
+       u16 val = 0;
+
+       if (kstrtou16(buf, 0, &val) && !val)
+               return -EINVAL;
+
+       pr_err("%s %d\n", __func__, val);
+
+       rc = write_property_id(bcdev, pst, USB_SOH_PROTECT, val);
+       if (rc < 0) {
+               pr_err("Failed to set oh_protect, rc=%d\n", rc);
+               return rc;
+       }
+
+       return count;
+}
+
+static ssize_t soh_protect_show(const struct class *c, const struct class_attribute *attr, char *buf)
+{
+       struct battery_chg_dev *bcdev = container_of(c, struct battery_chg_dev,
+                                               battery_class);
+       struct psy_state *pst = &bcdev->psy_list[PSY_TYPE_USB];
+       int rc;
+
+       rc = read_property_id(bcdev, pst, USB_SOH_PROTECT);
+       if (rc < 0)
+               return rc;
+
+       return scnprintf(buf, PAGE_SIZE, "%d\n", pst->prop[USB_SOH_PROTECT]);
+}
+static CLASS_ATTR_RW(soh_protect);
+
+static ssize_t force_5v_store(const struct class *c, const struct class_attribute *attr,
+		const char *buf, size_t count)
+{
+       struct battery_chg_dev *bcdev = container_of(c, struct battery_chg_dev,
+                                               battery_class);
+       struct psy_state *pst = &bcdev->psy_list[PSY_TYPE_USB];
+       int rc = 0;
+       u16 val = 0;
+
+       if (kstrtou16(buf, 0, &val) && !val)
+               return -EINVAL;
+
+       pr_err("%s %d\n", __func__, val);
+
+       rc = write_property_id(bcdev, pst, USB_FORCE_5V, val);
+       if (rc < 0) {
+               pr_err("Failed to set force_5v, rc=%d\n", rc);
+               return rc;
+       }
+
+       return count;
+}
+
+static ssize_t force_5v_show(const struct class *c, const struct class_attribute *attr, char *buf)
+{
+       struct battery_chg_dev *bcdev = container_of(c, struct battery_chg_dev,
+                                               battery_class);
+       struct psy_state *pst = &bcdev->psy_list[PSY_TYPE_USB];
+       int rc;
+
+       rc = read_property_id(bcdev, pst, USB_FORCE_5V);
+       if (rc < 0)
+               return rc;
+
+       return scnprintf(buf, PAGE_SIZE, "%d\n", pst->prop[USB_FORCE_5V]);
+}
+static CLASS_ATTR_RW(force_5v);
+
 static struct attribute *battery_class_attrs[] = {
 	&class_attr_soh.attr,
 	&class_attr_resistance.attr,
-	&class_attr_flash_active.attr,
 	&class_attr_moisture_detection_status.attr,
 	&class_attr_moisture_detection_en.attr,
 	&class_attr_wireless_boost_en.attr,
@@ -2261,6 +2583,15 @@ static struct attribute *battery_class_attrs[] = {
 	&class_attr_usb_typec_compliant.attr,
 	&class_attr_charge_control_en.attr,
 	&class_attr_battery_parallel_cell_count.attr,
+	&class_attr_usb_typec_orientation.attr,
+	&class_attr_smb_present.attr,
+	&class_attr_smb1_current.attr,
+	&class_attr_usb_in_disable.attr,
+	&class_attr_usb_charge_now.attr,
+	&class_attr_limit_capacity_charge.attr,
+	&class_attr_fake_soh.attr,
+	&class_attr_force_5v.attr,	
+	&class_attr_soh_protect.attr,
 	NULL,
 };
 ATTRIBUTE_GROUPS(battery_class);
@@ -2562,6 +2893,10 @@ static int battery_chg_probe(struct platform_device *pdev)
 	INIT_WORK(&bcdev->subsys_up_work, battery_chg_subsys_up_work);
 	INIT_WORK(&bcdev->usb_type_work, battery_chg_update_usb_type_work);
 	INIT_WORK(&bcdev->battery_check_work, battery_chg_check_status_work);
+	INIT_WORK(&bcdev->usb_charge_now_work,
+			battery_chg_reapply_usb_charge_now_work);
+	/* -1 means userspace has never configured usb_charge_now. */
+	bcdev->usb_charge_now_val = -1;
 	bcdev->dev = dev;
 
 	rc = battery_chg_register_panel_notifier(bcdev);

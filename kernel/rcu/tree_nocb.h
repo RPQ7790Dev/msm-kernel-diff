@@ -1595,7 +1595,7 @@ void rcu_bind_current_to_nocb(void)
 		WARN_ON(sched_setaffinity(current->pid, rcu_nocb_mask));
 }
 EXPORT_SYMBOL_GPL(rcu_bind_current_to_nocb);
-
+#if PRINTK_INFO_EN
 // The ->on_cpu field is available only in CONFIG_SMP=y, so...
 #ifdef CONFIG_SMP
 static char *show_rcu_should_be_on_cpu(struct task_struct *tsp)
@@ -1613,6 +1613,7 @@ static char *show_rcu_should_be_on_cpu(struct task_struct *tsp)
  * Dump out nocb grace-period kthread state for the specified rcu_data
  * structure.
  */
+
 static void show_rcu_nocb_gp_state(struct rcu_data *rdp)
 {
 	struct rcu_node *rnp = rdp->mynode;
@@ -1694,7 +1695,7 @@ static void show_rcu_nocb_state(struct rcu_data *rdp)
 		"sS"[!!rdp->nocb_gp_sleep],
 		".W"[wassleep]);
 }
-
+#endif
 #else /* #ifdef CONFIG_RCU_NOCB_CPU */
 
 static inline int rcu_lockdep_is_held_nocb(struct rcu_data *rdp)

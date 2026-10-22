@@ -1318,7 +1318,7 @@ DEFINE_DEBUGFS_ATTRIBUTE(cdsprm_resmgr_pdkill_debugfs_fops,
 			cdsprm_resmgr_pdkill_override_read,
 			cdsprm_resmgr_pdkill_override_write,
 			"%llu\n");
-
+#if PRINTK_INFO_EN
 static char *dcvs_vcorner(unsigned int i)
 {
 	switch (i) {
@@ -1443,7 +1443,7 @@ static char *lpm_state(unsigned int lpmState)
 		return "UNKNOWN";
 	}
 }
-
+#endif
 /** Input: bitwise-OR of values from #MmpmClientClassType */
 static void print_client_classes(unsigned int adsppmClientClass)
 {

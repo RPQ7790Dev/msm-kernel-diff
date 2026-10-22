@@ -35,7 +35,7 @@ __setup("no_file_caps", file_caps_disable);
  *
  *   http://www.kernel.org/pub/linux/libs/security/linux-privs/
  */
-
+#if PRINTK_INFO_EN
 static void warn_legacy_capability_use(void)
 {
 	char name[sizeof(current->comm)];
@@ -43,7 +43,7 @@ static void warn_legacy_capability_use(void)
 	pr_info_once("warning: `%s' uses 32-bit capabilities (legacy support in use)\n",
 		     get_task_comm(name, current));
 }
-
+#endif
 /*
  * Version 2 capabilities worked fine, but the linux/capability.h file
  * that accompanied their introduction encouraged their use without
@@ -59,7 +59,7 @@ static void warn_legacy_capability_use(void)
  * application with modern kernel headers and this warning will go
  * away.
  */
-
+#if PRINTK_INFO_EN
 static void warn_deprecated_v2(void)
 {
 	char name[sizeof(current->comm)];
@@ -67,7 +67,7 @@ static void warn_deprecated_v2(void)
 	pr_info_once("warning: `%s' uses deprecated v2 capabilities in a way that may be insecure\n",
 		     get_task_comm(name, current));
 }
-
+#endif
 /*
  * Version check. Return the number of u32s in each capability flag
  * array, or a negative value on error.
@@ -81,11 +81,15 @@ static int cap_validate_magic(cap_user_header_t header, unsigned *tocopy)
 
 	switch (version) {
 	case _LINUX_CAPABILITY_VERSION_1:
+#if PRINTK_INFO_EN
 		warn_legacy_capability_use();
+#endif
 		*tocopy = _LINUX_CAPABILITY_U32S_1;
 		break;
 	case _LINUX_CAPABILITY_VERSION_2:
+#if PRINTK_INFO_EN
 		warn_deprecated_v2();
+#endif
 		fallthrough;	/* v3 is otherwise equivalent to v2 */
 	case _LINUX_CAPABILITY_VERSION_3:
 		*tocopy = _LINUX_CAPABILITY_U32S_3;
